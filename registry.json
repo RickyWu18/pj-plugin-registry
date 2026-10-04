@@ -2,6 +2,38 @@
   "registry_version": 1.0,
   "extensions": [
     {
+      "id": "ardupilot-bin-loader",
+      "name": "Ardupilot BIN Loader",
+      "version": "0.1.1",
+      "description": "Data loader for Ardupilot BIN files. Flight log format for Ardupilot.",
+      "author": "Ricky Wu",
+      "publisher": "Ricky Wu",
+      "website": "https://github.com/RickyWu18/plotjuggler-drone",
+      "repository": "https://github.com/RickyWu18/plotjuggler-drone",
+      "license": "MIT",
+      "icon_url": "",
+      "category": "data_loader",
+      "tags": [
+        "file",
+        "loader",
+        "ardupilot",
+        "drone",
+        "flight"
+      ],
+      "min_plotjuggler_version": "4.0.0",
+      "min_sdk_required": "0.34.1",
+      "platforms": {
+        "linux-x86_64": {
+          "url": "https://github.com/RickyWu18/plotjuggler-drone/releases/download/data_load_ardupilot/v0.1.1/ardupilot-bin-loader-0.1.1-linux-x86_64.zip",
+          "checksum": "sha256:2dd7938f82f6aa9d9696543e66270410072bdb7f43ad3577c526b7b5482e3653"
+        },
+        "windows-x86_64": {
+          "url": "https://github.com/RickyWu18/plotjuggler-drone/releases/download/data_load_ardupilot/v0.1.1/ardupilot-bin-loader-0.1.1-windows-x64.zip",
+          "checksum": "sha256:2d4dcda1d2a3a809c409243d6191be7bb0bbc1e05da0808a72ccb4de6344c4bc"
+        }
+      }
+    },
+    {
       "id": "arrow-parser",
       "name": "Arrow IPC Parser",
       "version": "1.0.0",
