@@ -4,13 +4,16 @@
 Usage:
     python3 scripts/validate_registry.py                                        # Structure + URL checks
     python3 scripts/validate_registry.py --download-extensions-and-verify-checksums  # Download all ZIPs and verify SHA256
+    python3 scripts/validate_registry.py --download-extensions-and-verify-folder-structure  # Download all ZIPs and check <plugin-id>/ top folder
 """
 
 import argparse
 import hashlib
+import io
 import json
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
 REQUIRED_TOP_LEVEL = ["registry_version", "extensions"]
@@ -130,6 +133,30 @@ def verify_checksum(url: str, expected_checksum: str, timeout: int = 60) -> tupl
         return False, str(e)
 
 
+def verify_folder_structure(url: str, ext_id: str, timeout: int = 60) -> tuple[bool, str]:
+    """Download ZIP and verify every entry lives under a single '<ext_id>/' top folder.
+    Returns (success, error_message)."""
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "pj-plugin-registry-validator/1.0")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = io.BytesIO(resp.read())
+
+        with zipfile.ZipFile(data) as zf:
+            names = zf.namelist()
+            if not names:
+                return False, "zip is empty"
+
+            top_levels = {name.split("/", 1)[0] for name in names}
+            if top_levels == {ext_id}:
+                return True, ""
+            return False, f"top-level entries {sorted(top_levels)}, expected only '{ext_id}/'"
+    except zipfile.BadZipFile:
+        return False, "not a valid zip file"
+    except Exception as e:
+        return False, str(e)
+
+
 def validate_urls(registry: dict) -> list[str]:
     """Check all URLs are accessible. Returns list of errors."""
     errors = []
@@ -170,10 +197,31 @@ def validate_checksums(registry: dict) -> list[str]:
     return errors
 
 
+def validate_folder_structures(registry: dict) -> list[str]:
+    """Verify every ZIP has the plugin id as its top folder. Returns list of errors."""
+    errors = []
+    for ext in registry.get("extensions", []):
+        ext_id = ext.get("id", "unknown")
+        for platform, data in ext.get("platforms", {}).items():
+            url = data.get("url", "")
+            if not url:
+                continue
+
+            success, msg = verify_folder_structure(url, ext_id)
+            if success:
+                print(f"  ✓ {ext_id}/{platform}")
+            else:
+                errors.append(f"{ext_id}/{platform}: bad folder structure - {msg}")
+                print(f"  ✗ {ext_id}/{platform}: {msg}")
+    return errors
+
+
 def main():
     parser = argparse.ArgumentParser(description="Validate registry.json")
     parser.add_argument("--download-extensions-and-verify-checksums", action="store_true",
                         help="Download all extension ZIPs and verify SHA256 checksums (slow)")
+    parser.add_argument("--download-extensions-and-verify-folder-structure", action="store_true",
+                        help="Download all extension ZIPs and verify the top folder is the plugin id (slow)")
     parser.add_argument("--skip-urls", action="store_true", help="Skip URL accessibility checks")
     parser.add_argument("registry_file", nargs="?", default="registry.json", help="Path to registry.json")
     args = parser.parse_args()
@@ -217,6 +265,11 @@ def main():
         print("\nDownloading extensions and verifying checksums (this may take a while)...")
         checksum_errors = validate_checksums(registry)
         all_errors.extend(checksum_errors)
+
+    # Verify folder structure
+    if args.download_extensions_and_verify_folder_structure:
+        print("\nDownloading extensions and verifying folder structure (this may take a while)...")
+        all_errors.extend(validate_folder_structures(registry))
 
     # Summary
     print()
