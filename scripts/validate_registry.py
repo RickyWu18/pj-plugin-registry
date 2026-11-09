@@ -4,13 +4,17 @@
 Usage:
     python3 scripts/validate_registry.py                                        # Structure + URL checks
     python3 scripts/validate_registry.py --download-extensions-and-verify-checksums  # Download all ZIPs and verify SHA256
+    python3 scripts/validate_registry.py --download-extensions-and-verify-folder-structure  # Download all ZIPs and check <plugin-id>/ top folder
+    python3 scripts/validate_registry.py --download-extensions-and-verify           # Download once, run both checks
 """
 
 import argparse
 import hashlib
+import io
 import json
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
 REQUIRED_TOP_LEVEL = ["registry_version", "extensions"]
@@ -107,66 +111,91 @@ def check_url_exists(url: str, timeout: int = 10) -> tuple[bool, str]:
         return False, str(e)
 
 
-def verify_checksum(url: str, expected_checksum: str, timeout: int = 60) -> tuple[bool, str]:
-    """Download file and verify SHA256 checksum. Returns (success, error_message)."""
-    if not expected_checksum.startswith("sha256:"):
-        return False, "Invalid checksum format"
-
-    expected_hash = expected_checksum[7:]  # Remove "sha256:" prefix
-
+def download_extension(url: str, timeout: int = 60) -> tuple[bytes | None, str]:
+    """Download an extension ZIP. Returns (data, error_message); data is None on failure."""
     try:
         req = urllib.request.Request(url)
         req.add_header("User-Agent", "pj-plugin-registry-validator/1.0")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            sha256 = hashlib.sha256()
-            while chunk := resp.read(8192):
-                sha256.update(chunk)
-            actual_hash = sha256.hexdigest()
-
-            if actual_hash == expected_hash:
-                return True, ""
-            return False, f"expected {expected_hash[:16]}..., got {actual_hash[:16]}..."
+            return resp.read(), ""
     except Exception as e:
-        return False, str(e)
+        return None, str(e)
 
 
-def validate_urls(registry: dict) -> list[str]:
-    """Check all URLs are accessible. Returns list of errors."""
-    errors = []
-    for ext in registry.get("extensions", []):
-        ext_id = ext.get("id", "unknown")
-        for platform, data in ext.get("platforms", {}).items():
-            url = data.get("url", "")
-            if not url:
-                continue
+def verify_checksum(data: bytes, expected_checksum: str) -> tuple[bool, str]:
+    """Verify SHA256 checksum of downloaded bytes. Returns (success, error_message)."""
+    if not expected_checksum.startswith("sha256:"):
+        return False, "Invalid checksum format"
 
-            success, msg = check_url_exists(url)
-            if success:
-                print(f"  ✓ {ext_id}/{platform}")
-            else:
-                errors.append(f"{ext_id}/{platform}: URL not accessible - {msg}")
-                print(f"  ✗ {ext_id}/{platform}: {msg}")
-    return errors
+    expected_hash = expected_checksum[7:]  # Remove "sha256:" prefix
+    actual_hash = hashlib.sha256(data).hexdigest()
+
+    if actual_hash == expected_hash:
+        return True, ""
+    return False, f"expected {expected_hash[:16]}..., got {actual_hash[:16]}..."
 
 
-def validate_checksums(registry: dict) -> list[str]:
-    """Verify all checksums. Returns list of errors."""
+def verify_folder_structure(data: bytes, ext_id: str) -> tuple[bool, str]:
+    """Verify every ZIP entry lives under a single '<ext_id>/' top folder.
+    Returns (success, error_message)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = zf.namelist()
+    except zipfile.BadZipFile:
+        return False, "not a valid zip file"
+
+    if not names:
+        return False, "zip is empty"
+
+    top_levels = {name.split("/", 1)[0] for name in names}
+    if top_levels == {ext_id}:
+        return True, ""
+    return False, f"top-level entries {sorted(top_levels)}, expected only '{ext_id}/'"
+
+
+def validate_platforms(registry: dict, check_urls: bool, check_checksums: bool, check_structure: bool) -> list[str]:
+    """Check every platform entry in a single pass. Returns list of errors.
+
+    If a download is needed, each ZIP is fetched once and shared by all checks; a
+    successful download also proves the URL is accessible, so the HEAD request is skipped.
+    """
+    download = check_checksums or check_structure
     errors = []
     for ext in registry.get("extensions", []):
         ext_id = ext.get("id", "unknown")
         for platform, data in ext.get("platforms", {}).items():
             url = data.get("url", "")
             checksum = data.get("checksum", "")
+            label = f"{ext_id}/{platform}"
 
-            if not url or not checksum:
+            if not url:
                 continue
 
-            success, msg = verify_checksum(url, checksum)
-            if success:
-                print(f"  ✓ {ext_id}/{platform}")
+            failures = []
+            if download:
+                payload, msg = download_extension(url)
+                if payload is None:
+                    failures.append(f"URL not accessible - {msg}")
+                else:
+                    if check_checksums and checksum:
+                        ok, msg = verify_checksum(payload, checksum)
+                        if not ok:
+                            failures.append(f"checksum mismatch - {msg}")
+                    if check_structure:
+                        ok, msg = verify_folder_structure(payload, ext_id)
+                        if not ok:
+                            failures.append(f"bad folder structure - {msg}")
+            elif check_urls:
+                ok, msg = check_url_exists(url)
+                if not ok:
+                    failures.append(f"URL not accessible - {msg}")
+
+            if failures:
+                for failure in failures:
+                    errors.append(f"{label}: {failure}")
+                    print(f"  ✗ {label}: {failure}")
             else:
-                errors.append(f"{ext_id}/{platform}: checksum mismatch - {msg}")
-                print(f"  ✗ {ext_id}/{platform}: {msg}")
+                print(f"  ✓ {label}")
     return errors
 
 
@@ -174,6 +203,10 @@ def main():
     parser = argparse.ArgumentParser(description="Validate registry.json")
     parser.add_argument("--download-extensions-and-verify-checksums", action="store_true",
                         help="Download all extension ZIPs and verify SHA256 checksums (slow)")
+    parser.add_argument("--download-extensions-and-verify-folder-structure", action="store_true",
+                        help="Download all extension ZIPs and verify the top folder is the plugin id (slow)")
+    parser.add_argument("--download-extensions-and-verify", action="store_true",
+                        help="Download all extension ZIPs once and run both checks above (slow)")
     parser.add_argument("--skip-urls", action="store_true", help="Skip URL accessibility checks")
     parser.add_argument("registry_file", nargs="?", default="registry.json", help="Path to registry.json")
     args = parser.parse_args()
@@ -206,17 +239,16 @@ def main():
         ext_count = len(registry.get("extensions", []))
         print(f"  ✓ Structure valid ({ext_count} extensions)")
 
-    # Validate URLs
-    if not args.skip_urls:
-        print("\nChecking URLs...")
-        url_errors = validate_urls(registry)
-        all_errors.extend(url_errors)
-
-    # Verify checksums
-    if args.download_extensions_and_verify_checksums:
-        print("\nDownloading extensions and verifying checksums (this may take a while)...")
-        checksum_errors = validate_checksums(registry)
-        all_errors.extend(checksum_errors)
+    # Check URLs, and optionally download extensions to verify checksums / folder structure
+    check_checksums = args.download_extensions_and_verify or args.download_extensions_and_verify_checksums
+    check_structure = args.download_extensions_and_verify or args.download_extensions_and_verify_folder_structure
+    check_urls = not args.skip_urls
+    if check_urls or check_checksums or check_structure:
+        checks = [name for name, on in (("URLs", check_urls), ("checksums", check_checksums),
+                                        ("folder structure", check_structure)) if on]
+        slow = " (downloads extensions, this may take a while)" if check_checksums or check_structure else ""
+        print(f"\nChecking {', '.join(checks)}{slow}...")
+        all_errors.extend(validate_platforms(registry, check_urls, check_checksums, check_structure))
 
     # Summary
     print()
